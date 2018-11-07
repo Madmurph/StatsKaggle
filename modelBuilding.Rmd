@@ -1,0 +1,41 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r import}
+library(tidyverse)
+library(ggplot2)
+library(corrplot)
+library(rmarkdown)
+library(caret)
+library(dplyr)
+library(arm)
+library(readr)
+
+#Set the working directory
+setwd("/Users/murph/OneDrive/Documents/School/StatsPredAnalytics/KaggleProject")
+
+houses <- read.csv("train.csv")
+
+head(houses)
+```
+##Create model
+```{r model}
+houseCond<-cor(houses[c('OverallQual', 'OverallCond', 'YearBuilt','SalePrice', 'YearRemodAdd','BsmtFinSF1' ,
+                        'BsmtFinSF2','BsmtUnfSF','TotalBsmtSF','MiscVal','GarageCars', 'GarageArea','MSSubClass', 'LotArea')])
+houseCond
+
+houseRooms <-cor(houses[c('GrLivArea', 'BsmtFullBath', 'BsmtHalfBath','FullBath', 'HalfBath','BedroomAbvGr' ,
+                          'KitchenAbvGr','TotRmsAbvGrd','Fireplaces','PoolArea', 'SalePrice')])
+houseRooms
+
+#Model was best I could find using variables given, has R2 of approx 0.81
+#Using factor neighborhood was risky bc threat of overfit, but adjusted R2 isnt much different than multiple so shows factor isnt causing much or any overfit
+summary(lm(SalePrice ~ OverallQual+TotalBsmtSF+GrLivArea+GarageCars+factor(Neighborhood), houses))
+
+
+```
+
+
