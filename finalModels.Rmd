@@ -1,0 +1,299 @@
+---
+title: "KaggleProjectModels"
+author: "Madeline Murphy"
+date: "December 4, 2018"
+output: html_document
+---
+
+
+```{r import}
+library(tidyverse)
+library(ggplot2)
+library(corrplot)
+library(rmarkdown)
+library(caret)
+library(dplyr)
+library(arm)
+library(missForest)
+library(readr)
+
+#Set the working directory
+#setwd("/Users/murph/OneDrive/Documents/School/StatsPredAnalytics/KaggleProject")
+
+houses <- read.csv("train.csv")
+housestest <- read.csv("test.csv")
+
+head(houses)
+```
+
+```{r corrs}
+houseCond<-cor(houses[c('OverallQual', 'OverallCond', 'YearBuilt','SalePrice', 'YearRemodAdd','BsmtFinSF1' ,
+                        'BsmtFinSF2','BsmtUnfSF','TotalBsmtSF','MiscVal','GarageCars', 'GarageArea','MSSubClass')])
+corrplot(houseCond, method="number")
+
+houseRooms <-cor(houses[c('GrLivArea', 'BsmtFullBath', 'BsmtHalfBath','FullBath', 'HalfBath','BedroomAbvGr' ,
+                          'KitchenAbvGr','TotRmsAbvGrd','Fireplaces','PoolArea', 'SalePrice')])
+corrplot(houseRooms,method="number")
+
+```
+
+
+```{r sales price log}
+#Create histogram of sale price and log sale price
+#note sale price has long right hand tail, log is much more evenly distributed, may be good candidate for transformation because 1. Skewed outcome and 2. Outcome variable has large range ($625,000 - $34,900)
+summary(houses$SalePrice)
+
+#Show outliers of Sale Price
+ggplot(data = houses, aes(x = "", y = SalePrice)) + 
+  geom_boxplot() +
+  coord_cartesian(ylim = c(0, 600000))
+
+#Histograms showing differences in Sale price distributions vs log sale price
+#Long tail/skew
+hist(houses$SalePrice, xlab = "Sales", ylab = "Count")
+
+#Almost perfectly normally distributed
+hist(log(houses$SalePrice), xlab = "Sales", ylab = "Count")
+
+#Also log GrLivArea maybe?
+hist(houses$GrLivArea, xlab = "Year", ylab = "Count")
+
+#Almost perfectly normally distributed
+hist(log(houses$GrLivArea), xlab = "Year", ylab = "Count")
+
+
+#Also log GrLivArea maybe?
+hist(houses$TotalBsmtSF, xlab = "Year", ylab = "Count")
+
+#Almost perfectly normally distributed
+hist(log(houses$TotalBsmtSF), xlab = "Year", ylab = "Count")
+
+
+#Find near zero variance predictors, to exclude from data
+nearZeroVar(houses,  names= T)
+
+```
+
+```{r data cleaning}
+#Drop unimportant columns according to near zero var and near zero correlation
+houses<- subset(houses, select =-c(Id, Street, Alley, LandContour,LandSlope, RoofMatl,BsmtCond,BsmtFinType2,BsmtFinSF2,Heating,LowQualFinSF,KitchenAbvGr, LotShape, Utilities, Condition1, Condition2, Exterior1st, Exterior2nd, MasVnrType,MasVnrArea,PoolArea, PoolQC, MiscVal, MiscFeature, WoodDeckSF, OpenPorchSF, EnclosedPorch, X3SsnPorch, ScreenPorch,Fireplaces,FireplaceQu, Fence,Functional))
+
+#Drop observations where GrLivArea is greater than 4000 sq.ft as it is an extreme outlier
+ggplot(houses, aes(GrLivArea, SalePrice))+
+  geom_point()+
+  labs(title="GrLivArea Outliers")
+houses<- subset(houses, GrLivArea < 4000)
+
+houses$MoSold <- factor(houses$MoSold)
+houses$Neighborhood <- factor(houses$Neighborhood)
+
+summary(houses$Neighborhood)
+ggplot(houses, aes(Neighborhood, SalePrice)) +
+  geom_boxplot() + 
+  labs(title = "Boxplot of Sale Prices by Neighborhood")
+
+neighborlm <- lm(SalePrice ~ Neighborhood, data=houses)
+summary(neighborlm)
+
+#Understand average sale price by neighborhood
+#Note that there are 25 different neighborhoods, in order to reduce overfit, new variable made to reduce neighborhoods based on mean sale price >$200000 = 'high' class else 'low'
+#Do this because in model not all neighborhoods are significant, but we do know the neighborhood in general is  so break it down a little simpler
+#Maybe try cluster analysis to better understand which neighborhoods are similar?
+houses %>% group_by(Neighborhood) %>% summarize(Average=mean(SalePrice)) %>% ungroup() %>% arrange(-Average) %>% data.frame
+houses$NeighborhoodClass <- ifelse(houses$Neighborhood == "NridgHt" | houses$Neighborhood == "NoRidge" | houses$Neighborhood == "StoneBr" | houses$Neighborhood == "Timber" | houses$Neighborhood == "Veenker" | houses$Neighborhood == "Somerst" | houses$Neighborhood == "ClearCr" | houses$Neighborhood == "Crawfor", "high", "low")
+
+housestest$NeighborhoodClass <- ifelse(housestest$Neighborhood == "NridgHt" | housestest$Neighborhood == "NoRidge" | housestest$Neighborhood == "StoneBr" | housestest$Neighborhood == "Timber" | housestest$Neighborhood == "Veenker" | housestest$Neighborhood == "Somerst" | housestest$Neighborhood == "ClearCr" | housestest$Neighborhood == "Crawfor", "high", "low")
+
+
+
+#Create smaller data set to work with
+housesSm <- subset(houses, select = c(SalePrice, OverallQual, TotalBsmtSF, GrLivArea, GarageCars, NeighborhoodClass, YearBuilt, YearRemodAdd, ExterQual, LotArea, BldgType, FullBath, TotRmsAbvGrd, X1stFlrSF, X2ndFlrSF))
+
+housestestSM<-subset(housestest, select = c(Id, OverallQual, TotalBsmtSF, GrLivArea, GarageCars, NeighborhoodClass, YearBuilt, YearRemodAdd, ExterQual, LotArea, BldgType, FullBath, TotRmsAbvGrd, X1stFlrSF, X2ndFlrSF))
+
+#Adjust total basement SF to change NA
+housesSm[is.na(housesSm)] <- 0
+housestestSM[is.na(housestestSM)] <- 0
+
+#Calculate variale that includes total square footage of whole house, including garage
+housesSm$TotalAllSF <- housesSm$TotalBsmtSF + housesSm$X1stFlrSF + housesSm$X2ndFlrSF
+housestestSM$TotalAllSF <- housestestSM$TotalBsmtSF + housestestSM$X1stFlrSF + housestestSM$X2ndFlrSF
+
+
+ggplot(houses, aes(TotalAllSF, SalePrice))+
+  geom_point()+
+  labs(title="TotalAllSF Outliers")
+
+
+```
+
+```{r linear model building}
+#Create polynomial classification of garage quality, feature engineering
+#grades <- c( "Po", "Fa", "TA", "Gd", "Ex")
+#houses$GarageGrade <- match(houses$GarageQual, grades) * match(houses$GarageCond, grades)
+
+#Split the data into test and train sets
+set.seed(222)
+rows <- createDataPartition(houses$SalePrice, p = .7, list = F) # create random row vector
+train <- houses[rows,] # subset using row vector
+test <- houses[-rows,]
+
+
+# Interim Model (5 predictors)
+interim <- lm(SalePrice ~ OverallQual+TotalBsmtSF+GrLivArea+GarageCars+factor(NeighborhoodClass), train)
+summary(interim)
+
+
+#LM Model including New neighborhood class variable as well as additional variables
+linearFinal <- lm(SalePrice ~ OverallQual+
+             TotalBsmtSF+
+             GrLivArea+
+             GarageCars+
+             factor(NeighborhoodClass)+
+             YearBuilt+
+             factor(BsmtQual)+
+             factor(ExterQual)+
+             LotArea+
+             factor(BldgType), 
+           train)
+summary(linearFinal)
+
+
+#Linear model including log of some variables to normalize them
+linearLogTrans <- lm(log(SalePrice) ~ OverallQual+
+             TotalBsmtSF+
+             log(GrLivArea)+
+             GarageCars+
+             factor(NeighborhoodClass)+
+             YearBuilt+
+             factor(ExterQual)+
+             LotArea+
+             factor(BldgType), 
+           train)
+summary(linearLogTrans)
+
+
+
+#Remove more outliers
+summary(housesSm$TotalBsmtSF)
+ggplot(housesSm, aes(TotalBsmtSF, SalePrice))+
+  geom_point()+
+  labs(title="TotalBsmtSF Outliers")
+housesSm<- subset(housesSm, TotalBsmtSF < 3000)
+
+ggplot(housesSm, aes(LotArea, SalePrice))+
+  geom_point()+
+  labs(title="LotArea Outliers")
+housesSm<- subset(housesSm, LotArea < 100000)
+
+
+hist(housesSm$YearRemodAdd, xlab = "Year", ylab = "Count")
+
+#Almost perfectly normally distributed
+hist(log(housesSm$YearRemodAdd), xlab = "Year", ylab = "Count")
+
+
+
+#Create new test and train sets
+set.seed(222)
+rowsSm <- createDataPartition(housesSm$SalePrice, p = .7, list = F) # create random row vector
+trainSm <- housesSm[rowsSm,] # subset using row vector
+testSm <- housesSm[-rowsSm,]
+
+#Improved linear log
+linearLogImp <- lm(log(SalePrice) ~ OverallQual+
+             log(GrLivArea)+
+             GarageCars+
+             factor(NeighborhoodClass)+
+             YearBuilt+
+             factor(ExterQual)+
+             LotArea+
+             factor(BldgType)+
+             TotalAllSF +
+             YearRemodAdd+
+             FullBath, 
+           trainSm)
+summary(linearLogImp)
+
+```
+
+```{r rmse function}
+# Calculate RMSE
+rmse <- function(actual, fitted) sqrt(mean((actual - fitted)^2))
+#Linear RMSE
+rmse(train$SalePrice, fitted(linearFinal))
+
+#Log RMSE
+rmse(train$SalePrice, fitted(linearLogTrans))
+
+#interim RMSE
+rmse(train$SalePrice, fitted(interim))
+
+#Improved RMSE
+rmse(trainSm$SalePrice, fitted(linearLogImp))
+```
+##Out of Sample Results
+```{r out sample}
+# Fit the model
+caret_model <- train(SalePrice ~ OverallQual+
+             TotalBsmtSF+
+             GrLivArea+
+             GarageCars+
+             factor(NeighborhoodClass)+
+             YearBuilt+
+             factor(BsmtQual)+
+             factor(ExterQual)+
+             LotArea+
+             factor(BldgType) , 
+      data = houses,
+      method = "lm",
+      trControl = trainControl(method = "repeatedcv", # Here is the code for CV
+                               repeats = 10, 
+                               number = 10))
+# Estimated out of sample fit is what caret prints automatically
+# to the screen:
+caret_model 
+
+rmse <- function(actual, predicted) sqrt(mean((actual- predicted)^2))
+rmse(test$SalePrice, predict(linearFinal, test))
+
+rmse(test$SalePrice, predict(interim, test))
+
+```
+
+```{r testing}
+#New and improved linear model predictions on submission data
+housestest$SalePrice <- predict(linearFinal,housestest)
+
+#Subset the housestest data to only include the ID and predicted values for submission
+submission<- housestest %>% dplyr::select(Id, SalePrice)
+
+#Write submission data frame to csv
+write.csv(submission, file = "linearsubmission.csv")
+
+
+#Log predictions on test submission data re-transforming sales price back to original units (not logged units)
+housestest$SalePrice <- exp(predict(linearLogTrans,housestest))
+
+#Subset the housestest data to only include the ID and predicted values for submission
+submission<- housestest %>% dplyr::select(Id, SalePrice)
+
+#Write submission data frame to csv
+write.csv(submission, file = "logsubmission.csv")
+
+
+
+
+
+#BEST ONE YET
+#Log predictions on test submission data re-transforming sales price back to original units (not logged units)
+housestestSM$SalePrice <- exp(predict(linearLogImp,housestestSM))
+
+#Subset the housestest data to only include the ID and predicted values for submission
+submission<- housestestSM %>% dplyr::select(Id, SalePrice)
+
+#Write submission data frame to csv
+write.csv(submission, file = "logImpsubmission.csv")
+```
+
+
